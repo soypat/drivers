@@ -8,13 +8,14 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"machine"
 	"strings"
 	"time"
 
 	"tinygo.org/x/drivers/net"
-	"tinygo.org/x/drivers/net/tls"
+	"tinygo.org/x/drivers/net/http"
 	"tinygo.org/x/drivers/wifinina"
 )
 
@@ -23,7 +24,7 @@ const ssid = ""
 const pass = ""
 
 // IP address of the server aka "hub". Replace with your own info.
-const server = "tinygo.org"
+const url = "https://www.example.com/"
 
 // these are the default pins for the Arduino Nano33 IoT.
 // change these to connect to a different UART or pins for the ESP8266/ESP32
@@ -36,7 +37,7 @@ var (
 	adaptor *wifinina.Device
 )
 
-var buf [256]byte
+var buf [0x1000]byte
 
 var lastRequestTime time.Time
 var conn net.Conn
@@ -61,16 +62,57 @@ func setup() {
 func main() {
 
 	setup()
+	http.SetBuf(buf[:])
 
 	waitSerial()
 
 	connectToAP()
 
+	// You can send and receive cookies in the following way
+	// 	import "tinygo.org/x/drivers/net/http/cookiejar"
+	// 	jar, err := cookiejar.New(nil)
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	client := &http.Client{Jar: jar}
+	// 	http.DefaultClient = client
+
+	cnt := 0
 	for {
-		readConnection()
-		if time.Now().Sub(lastRequestTime).Milliseconds() >= 10000 {
-			makeHTTPSRequest()
+		// Various examples are as follows
+		//
+		// -- Get
+		// 	resp, err := http.Get(url)
+		//
+		// -- Post
+		// 	body := `cnt=12`
+		// 	resp, err = http.Post(url, "application/x-www-form-urlencoded", strings.NewReader(body))
+		//
+		// -- Post with JSON
+		// 	body := `{"msg": "hello"}`
+		// 	resp, err := http.Post(url, "application/json", strings.NewReader(body))
+
+		resp, err := http.Get(url)
+		if err != nil {
+			fmt.Printf("%s\r\n", err.Error())
+			continue
 		}
+
+		fmt.Printf("%s %s\r\n", resp.Proto, resp.Status)
+		for k, v := range resp.Header {
+			fmt.Printf("%s: %s\r\n", k, strings.Join(v, " "))
+		}
+		fmt.Printf("\r\n")
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			fmt.Printf("%s\r\n", scanner.Text())
+		}
+		resp.Body.Close()
+
+		cnt++
+		fmt.Printf("-------- %d --------\r\n", cnt)
+		time.Sleep(10 * time.Second)
 	}
 
 }
@@ -80,44 +122,6 @@ func waitSerial() {
 	for !machine.Serial.DTR() {
 		time.Sleep(100 * time.Millisecond)
 	}
-}
-
-func readConnection() {
-	if conn != nil {
-		for n, err := conn.Read(buf[:]); n > 0; n, err = conn.Read(buf[:]) {
-			if err != nil {
-				println("Read error: " + err.Error())
-			} else {
-				print(string(buf[0:n]))
-			}
-		}
-	}
-}
-
-func makeHTTPSRequest() {
-
-	var err error
-	if conn != nil {
-		conn.Close()
-	}
-
-	message("\r\n---------------\r\nDialing TCP connection")
-	conn, err = tls.Dial("tcp", server, nil)
-	for ; err != nil; conn, err = tls.Dial("tcp", server, nil) {
-		message("Connection failed: " + err.Error())
-		time.Sleep(5 * time.Second)
-	}
-	println("Connected!\r")
-
-	print("Sending HTTPS request...")
-	fmt.Fprintln(conn, "GET / HTTP/1.1")
-	fmt.Fprintln(conn, "Host:", strings.Split(server, ":")[0])
-	fmt.Fprintln(conn, "User-Agent: TinyGo")
-	fmt.Fprintln(conn, "Connection: close")
-	fmt.Fprintln(conn)
-	println("Sent!\r\n\r")
-
-	lastRequestTime = time.Now()
 }
 
 // connect to access point
