@@ -83,7 +83,7 @@ func (d Dev) SetPeriod(period uint64) error {
 	return d.Sleep(false)
 }
 
-// Top returns max value PWM can take.
+// Top returns max value PWM can take. It always returns 4095 for the PCA9685.
 func (d Dev) Top() uint32 {
 	return maxtop
 }

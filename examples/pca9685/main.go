@@ -11,30 +11,53 @@ func main() {
 	const (
 		// Default address on most breakout boards.
 		pcaAddr = 0x40
+		// 200Hz PWM
+		period = 1e9 / 200
 	)
 	err := machine.I2C0.Configure(machine.I2CConfig{})
 	if err != nil {
 		panic(err.Error())
 	}
-	d := pca9685.New(machine.I2C0, 0x40)
+	d := pca9685.New(machine.I2C0, pcaAddr)
 	err = d.IsConnected()
 	if err != nil {
 		panic(err.Error())
 	}
-	err = d.Configure(pca9685.PWMConfig{Period: 1e9 / 200}) // 200Hz PWM
+	err = d.Configure(pca9685.PWMConfig{Period: period})
 	if err != nil {
 		panic(err.Error())
 	}
-
 	var value uint32
 	step := d.Top() / 5
-	for {
+	for count := 0; count < 10; count++ {
 		for value = 0; value <= d.Top(); value += step {
 			d.SetAll(value)
 			dc := 100 * value / d.Top()
 			println("set dc @", dc, "%")
 			time.Sleep(800 * time.Millisecond)
 		}
+	}
+
+	// Below is the usage of DevBuffered which is well suited for fast response
+	// PWM signals.
+	db := pca9685.NewBuffered(machine.I2C0, pcaAddr)
+	err = db.IsConnected()
+	if err != nil {
+		panic(err.Error())
+	}
+	err = db.Configure(pca9685.PWMConfig{Period: period})
+	if err != nil {
+		panic(err.Error())
+	}
+	for ch := 0; ch < 16; ch++ {
+		// This does not perform IO on I2C bus.
+		db.PrepSet(0, db.Top()/uint32(ch+1))
+	}
+	// All 16 PWM registers are written in one I2C transaction
+	// to minimize bus overhead.
+	err = db.Update()
+	if err != nil {
+		panic(err.Error())
 	}
 }
 
