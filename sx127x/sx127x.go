@@ -21,8 +21,9 @@ const (
 
 // Device wraps an SPI connection to a SX127x device.
 type Device struct {
-	spi            drivers.SPI          // SPI bus for module communication
-	rstPin         machine.Pin          // GPIO for reset
+	spi            drivers.SPI // SPI bus for module communication
+	rstPin         machine.Pin // GPIO for reset
+	cs             machine.Pin
 	radioEventChan chan lora.RadioEvent // Channel for Receiving events
 	loraConf       lora.Config          // Current Lora configuration
 	controller     RadioController      // to manage interactions with the radio
@@ -43,9 +44,10 @@ func (d *Device) GetRadioEventChan() chan lora.RadioEvent {
 }
 
 // New creates a new SX127x connection. The SPI bus must already be configured.
-func New(spi machine.SPI, rstPin machine.Pin) *Device {
+func New(spi drivers.SPI, rstPin, cs machine.Pin) *Device {
 	k := Device{
 		spi:            spi,
+		cs:             cs,
 		rstPin:         rstPin,
 		radioEventChan: make(chan lora.RadioEvent, RADIOEVENTCHAN_SIZE),
 		spiTxBuf:       make([]byte, SPI_BUFFER_SIZE),
@@ -81,7 +83,7 @@ func (d *Device) DetectDevice() bool {
 
 // ReadRegister reads register value
 func (d *Device) ReadRegister(reg uint8) uint8 {
-	d.controller.SetNss(false)
+	d.cs.Low()
 	// Send register
 	//d.spiTxBuf = []byte{reg & 0x7f}
 	d.spiTxBuf = d.spiTxBuf[:0]
@@ -91,13 +93,13 @@ func (d *Device) ReadRegister(reg uint8) uint8 {
 	d.spiRxBuf = d.spiRxBuf[:0]
 	d.spiRxBuf = append(d.spiRxBuf, 0)
 	d.spi.Tx(nil, d.spiRxBuf)
-	d.controller.SetNss(true)
+	d.cs.High()
 	return d.spiRxBuf[0]
 }
 
 // WriteRegister writes value to register
 func (d *Device) WriteRegister(reg uint8, value uint8) uint8 {
-	d.controller.SetNss(false)
+	d.cs.Low()
 	// Send register
 	d.spiTxBuf = d.spiTxBuf[:0]
 	d.spiTxBuf = append(d.spiTxBuf, byte(reg|0x80))
@@ -108,7 +110,7 @@ func (d *Device) WriteRegister(reg uint8, value uint8) uint8 {
 	d.spiRxBuf = d.spiRxBuf[:0]
 	d.spiRxBuf = append(d.spiRxBuf, 0)
 	d.spi.Tx(d.spiTxBuf, d.spiRxBuf)
-	d.controller.SetNss(true)
+	d.cs.High()
 	return d.spiRxBuf[0]
 }
 
@@ -410,10 +412,7 @@ func (d *Device) Tx(pkt []uint8, timeoutMs uint32) error {
 	// Enable TX
 	d.SetOpMode(SX127X_OPMODE_TX)
 
-	msg := <-d.GetRadioEventChan()
-	if msg.EventType != lora.RadioEventTxDone {
-		return errors.New("Unexpected Radio Event while TX " + string(0x30+msg.EventType))
-	}
+	time.Sleep(time.Second)
 	return nil
 }
 
