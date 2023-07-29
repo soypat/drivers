@@ -266,6 +266,22 @@ func (d *Device) LoraConfig(cnf lora.Config) {
 	// Save given configuration
 	d.loraConf = cnf
 	d.loraConf.SyncWord = syncword(int(cnf.SyncWord))
+	d.SetHopPeriod(0x00)
+	d.SetLowFrequencyModeOn(false)                                                      // High freq mode
+	d.WriteRegister(SX127X_REG_PA_RAMP, (d.ReadRegister(SX127X_REG_PA_RAMP)&0xF0)|0x08) // set PA ramp-up time 50 uSec
+	d.WriteRegister(SX127X_REG_LNA, SX127X_LNA_MAX_GAIN)                                // Set Low Noise Amplifier to MAX
+
+	d.SetFrequency(d.loraConf.Freq)
+	d.SetPreambleLength(d.loraConf.Preamble)
+	d.SetBandwidth(d.loraConf.Bw)
+	d.SetSpreadingFactor(d.loraConf.Sf)
+	d.SetSyncWord(d.loraConf.SyncWord)
+	d.SetIqMode(d.loraConf.Iq)
+	d.SetCodingRate(d.loraConf.Cr)
+	d.SetCrc(d.loraConf.Crc == lora.CRCOn)
+	d.SetTxPower(d.loraConf.LoraTxPowerDBm)
+	d.SetHeaderType(d.loraConf.HeaderType)
+	d.SetAgcAuto(SX127X_AGC_AUTO_ON)
 }
 
 // SetFrequency updates the frequency the LoRa module is using
@@ -412,7 +428,16 @@ func (d *Device) Tx(pkt []uint8, timeoutMs uint32) error {
 	// Enable TX
 	d.SetOpMode(SX127X_OPMODE_TX)
 
-	time.Sleep(time.Second)
+	var irq uint8
+	deadline := time.Now().Add(5 * time.Second)
+	for irq&SX127X_IRQ_LORA_TXDONE_MASK == 0 {
+		if time.Until(deadline) <= 0 {
+			return errors.New("deadline exceed")
+		}
+		time.Sleep(10 * time.Millisecond)
+		// runtime.Gosched() // Yield to scheduler.
+		irq = d.ReadRegister(SX127X_REG_IRQ_FLAGS)
+	}
 	return nil
 }
 
@@ -425,22 +450,10 @@ func (d *Device) Rx(timeoutMs uint32) ([]uint8, error) {
 	d.SetOpModeLora()
 	d.SetOpMode(SX127X_OPMODE_SLEEP)
 
-	d.SetHopPeriod(0x00)
-	d.SetLowFrequencyModeOn(false)                                                      // High freq mode
-	d.WriteRegister(SX127X_REG_PA_RAMP, (d.ReadRegister(SX127X_REG_PA_RAMP)&0xF0)|0x08) // set PA ramp-up time 50 uSec
-	d.WriteRegister(SX127X_REG_LNA, SX127X_LNA_MAX_GAIN)                                // Set Low Noise Amplifier to MAX
-
-	d.SetFrequency(d.loraConf.Freq)
-	d.SetPreambleLength(d.loraConf.Preamble)
+	// Syncword and Spread factor must be set to ensure correct detection on every
+	// Rx call. Not sure why...
 	d.SetSyncWord(d.loraConf.SyncWord)
-	d.SetBandwidth(d.loraConf.Bw)
 	d.SetSpreadingFactor(d.loraConf.Sf)
-	d.SetIqMode(d.loraConf.Iq)
-	d.SetCodingRate(d.loraConf.Cr)
-	d.SetCrc(d.loraConf.Crc == lora.CRCOn)
-	d.SetTxPower(d.loraConf.LoraTxPowerDBm)
-	d.SetHeaderType(d.loraConf.HeaderType)
-	d.SetAgcAuto(SX127X_AGC_AUTO_ON)
 
 	// set the IRQ mapping DIO0=RxDone DIO1=RxTimeout DIO2=NOP
 	d.WriteRegister(SX127X_REG_DIO_MAPPING_1, SX127X_MAP_DIO0_LORA_RXDONE|SX127X_MAP_DIO1_LORA_RXTOUT|SX127X_MAP_DIO2_LORA_NOP)
@@ -453,15 +466,24 @@ func (d *Device) Rx(timeoutMs uint32) ([]uint8, error) {
 	// Go routine is a workaround to stop the Continuous RX and fire a timeout Event
 	d.SetOpMode(SX127X_OPMODE_RX)
 
-	var msg lora.RadioEvent
-	select {
-	case msg = <-d.radioEventChan:
-		if msg.EventType != lora.RadioEventRxDone {
-			return nil, errors.New("Unexpected Radio Event while RX " + string(0x30+msg.EventType))
+	// Loop until Rx received or timeout IRQ.
+	var irq uint8
+	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
+	for irq&(SX127X_IRQ_LORA_RXDONE_MASK|SX127X_IRQ_LORA_RXTOUT_MASK) == 0 {
+		time.Sleep(10 * time.Millisecond)
+		if time.Since(deadline) > 0 {
+			return nil, errors.New("timeout")
 		}
-	case <-time.After(time.Millisecond * time.Duration(timeoutMs)):
-		d.SetOpMode(SX127X_OPMODE_STANDBY)
-		return nil, nil
+		irq = d.ReadRegister(SX127X_REG_IRQ_FLAGS)
+	}
+	// Check for payload integrity and timeout interrupt.
+	if irq&SX127X_IRQ_LORA_CRCERR_MASK != 0 {
+		if d.loraConf.HeaderType == lora.HeaderImplicit {
+			return nil, errors.New("packet too large for implicit header")
+		}
+		return nil, errors.New("CRC invalid")
+	} else if irq&SX127X_IRQ_LORA_RXTOUT_MASK != 0 {
+		return nil, errors.New("timeout")
 	}
 
 	// Get the received payload
@@ -469,6 +491,9 @@ func (d *Device) Rx(timeoutMs uint32) ([]uint8, error) {
 	d.WriteRegister(SX127X_REG_FIFO_ADDR_PTR, 0)
 
 	pLen := d.ReadRegister(SX127X_REG_RX_NB_BYTES)
+	if pLen == 0 {
+		return nil, errors.New("Empty packet")
+	}
 	d.WriteRegister(SX127X_REG_FIFO_ADDR_PTR, d.ReadRegister(SX127X_REG_FIFO_RX_CURRENT_ADDR))
 
 	rxData := []uint8{}

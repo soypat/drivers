@@ -37,6 +37,10 @@ func main() {
 		panic("device not detected")
 	}
 	toodledoo.LoraConfig(lora.Config{
+		Crc:            lora.CRCOn,
+		Iq:             lora.IQStandard,
+		SyncWord:       lora.SyncPublic,
+		HeaderType:     lora.HeaderExplicit,
 		Freq:           433500000,
 		Cr:             lora.CodingRate4_7,
 		Sf:             lora.SpreadingFactor9,
@@ -45,13 +49,16 @@ func main() {
 		Preamble:       8,
 		LoraTxPowerDBm: 20,
 	})
+	toodledoo.SetRxTimeout(255)
+	// RX RX RX RX RX RX RX RX RX
 	for {
-		err = toodledoo.Tx([]byte("Hello World!"), 10000)
+		startRx := time.Now()
+		packet, err := toodledoo.Rx(7000)
 		if err != nil {
-			println("error sending message", err.Error())
+			println("error receiving message", err.Error())
 		} else {
-			println("message sent")
+			println("message rx in", time.Since(startRx).String())
+			println(string(packet))
 		}
-		time.Sleep(5 * time.Second)
 	}
 }
